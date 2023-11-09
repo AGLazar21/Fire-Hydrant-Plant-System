@@ -19,22 +19,26 @@
 SYSTEM_MODE(AUTOMATIC);
 TCPClient TheClient;
 Adafruit_MQTT_SPARK mqtt(&TheClient,AIO_SERVER,AIO_SERVERPORT,AIO_USERNAME,AIO_KEY);
-Adafruit_MQTT_Publish airQualFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/airQualityFeed");
-Adafruit_MQTT_Publish dustFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/dustfeed");
+Adafruit_MQTT_Subscribe waterPlantFeed = Adafruit_MQTT_Subscribe(&mqtt, AIO_USERNAME "/feeds/waterPlantFeed"); 
+Adafruit_MQTT_Publish airQFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/airQualityFeed");
+Adafruit_MQTT_Publish humFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/humFeed");
+Adafruit_MQTT_Publish moistFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/mositFeed");
+Adafruit_MQTT_Publish tempFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/tempFeed");
 const int OLED_RESET = -1, PUMP= D16;
 const char hexAddress = 0x76;
 Adafruit_SSD1306 display(OLED_RESET);
 AirQualitySensor airQualSens(A1);
 Adafruit_BME280 bme;
-int status,tempC,pressPA,humidRH,tempF,inHG, soilMoist = A2,lastTime;
-const int DUSTSENS = A0;
-unsigned int startTime1, startTime2,startTime3 , airValue, duration, lowPulseOcc, currentQuality = -1;
+int status,tempC,pressPA,humidRH,tempF,inHG, soilMoist = A2,subValue;
+const int DUSTSENS = A0, ONEHOUR=600000;
+unsigned int startTime1, airValue, duration, lowPulseOcc, currentQuality = -1;
 float ratio = 0, concentration = 0;
-void bmeReading();
-void dustSensor();
+void bmeReading(int interval);
+void dustSensor(int interval);
 void MQTT_connect();
-void airSens();
-void readSoil();
+void airSens(int interval);
+void waterPump(int pump,int timeON);
+void readSoil(int pin, int interval, int threshold);
 
 void setup() {
   WiFi.on();
@@ -52,101 +56,130 @@ void setup() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(WHITE);
-  startTime1 = millis();
-  startTime2 = millis();
-  startTime3 = millis();
   pinMode(PUMP,OUTPUT);
+  mqtt.subscribe(&waterPlantFeed);
 }
 
 void loop() {
   MQTT_connect();
-  bmeReading();
-  airSens();
-  if((millis()-startTime3)>6000){
-  readSoil();
-  startTime3 = millis();
+  bmeReading(10000);
+  airSens(10000);
+  readSoil(soilMoist,ONEHOUR,2700);
+  //dustSensor(60000);
+  Adafruit_MQTT_Subscribe *subscription;
+  while ((subscription = mqtt.readSubscription(100))) {
+    if (subscription == &waterPlantFeed) {
+      subValue = atof((char *)waterPlantFeed.lastread);
+      digitalWrite(PUMP,subValue);
+      Serial.printf("water plant:%i\n", subValue);
   }
-  dustSensor();
+}
 }
 
+void bmeReading(int interval){
+  static unsigned int currentTime, lastTime;
+  currentTime =  millis();
 
-void bmeReading(){
-  display.clearDisplay();
-  tempC= bme.readTemperature();
-  pressPA = bme.readPressure();
-  humidRH = bme.readHumidity();
+    if((currentTime-lastTime)>interval){
+      lastTime = millis();
+      display.clearDisplay();
+      tempC= bme.readTemperature();
+      pressPA = bme.readPressure();
+      humidRH = bme.readHumidity();
 
-  tempF = map(tempC,0,38,32,100);
-  inHG = map(pressPA,0,135456,0,40);
-
-  display.setCursor(0,0);
-  display.printf("Temp F: %i",tempF);
-  display.display();
-  display.setCursor(0,20);
-  display.printf("Pressure: %i",inHG);
-  display.display();display.setCursor(0,40);
-  display.printf("Humidity: %i",humidRH);
-  display.display();
-  return;
+      tempF = map(tempC,0,38,32,100);
+      inHG = map(pressPA,0,135456,0,40);
+      display.setRotation(3);
+      display.setCursor(0,0);
+      display.printf("Temp F: %i",tempF);
+      display.display();
+      display.setCursor(0,20);
+      display.printf("Press: %i",inHG);
+      display.display();display.setCursor(0,40);
+      display.printf("Hum: %i",humidRH);
+      display.display();
+      humFeed.publish(humidRH);
+      tempFeed.publish(tempF);
+    }
 }
 
+void dustSensor(int interval){  //Reads air particles in room and prints/publishs the data 
+static unsigned int currentTime, lastTime;
+int startTime = millis();
 
-void dustSensor(){  //Reads air particles in room and prints/publishs the data 
+currentTime = millis();
+if((currentTime - lastTime)>interval){
+  lastTime = millis();
   duration = pulseIn(DUSTSENS,LOW);
   lowPulseOcc = lowPulseOcc+duration;
 
-  if((millis()-startTime1)>30000){
+  if((millis()-startTime)>30000){
     ratio = lowPulseOcc/(300000.0);
     concentration = 1.1*pow(ratio,3)-3.8*pow(ratio,3)+520*ratio+0.62;
     Serial.printf("Low Pulse Occ = %i, Ratio = %f, Concentration = %f\n",lowPulseOcc,ratio,concentration);
     //dustFeed.publish(concentration);
     lowPulseOcc = 0;
-    startTime1 = millis();
+    startTime = millis();
   }
   return;
 }
+}
 
-void airSens(){  //reads air qualuity and gives back a reading in case form asell as quantitative value 
-  if((millis()-startTime2)>500){
-  airValue = airQualSens.getValue();
-  currentQuality = airQualSens.slope();
-  switch(currentQuality){
-    case 0:
-      Serial.printf("HIGH POLLUTION, YOURE GOING TO DIE!\n");
-      //airQualFeed.publish("HIGH POLLUTION, YOURE GOING TO DIE!\n");
-      break;
-    case 1:
-      Serial.printf("High pollution!\n");
-      //airQualFeed.publish("High pollution!\n");
-      break;
-    case 2:
-      Serial.printf("Low polution.\n");
-      //airQualFeed.publish("Low polution.\n");
-      break;
-    case 3:
-      Serial.printf("Fresh Air.\n");
-      //airQualFeed.publish("Fresh Air.\n");
-      break;
+
+void airSens(int interval){  //reads air qualuity and gives back a reading in case form asell as quantitative value 
+  static unsigned int currentTime, lastTime;
+  currentTime =  millis();
+
+  if((currentTime-lastTime)>interval){
+    lastTime = millis();
+    airValue = airQualSens.getValue();
+    currentQuality = airQualSens.slope();
+    switch(currentQuality){
+      case 0:
+        Serial.printf("HIGH POLLUTION, YOURE GOING TO DIE!\n");
+        airQFeed.publish("HIGH POLLUTION, YOURE GOING TO DIE!\n");
+        break;
+      case 1:
+        Serial.printf("High pollution!\n");
+        airQFeed.publish("High pollution!\n");
+        break;
+      case 2:
+        Serial.printf("Low polution.\n");
+        airQFeed.publish("Low polution.\n");
+        break;
+      case 3:
+        Serial.printf("Fresh Air.\n");
+        airQFeed.publish("Fresh Air.\n");
+        break;
   }
   Serial.printf("Quant Value= %i\n",airValue);
-  startTime2 = millis();
 }
-return;
 }
 
 
-void readSoil(){ // checks moisture of soil and waters if neccesary 
-  int moistReading = analogRead(soilMoist);
-    if(moistReading < 2700){
-      /* digitalWrite(PUMP,HIGH);
-      delay(500);
-      digitalWrite(PUMP,LOW); */
+void readSoil(int pin, int interval, int threshold){ // checks moisture of soil and waters if neccesary 
+  static unsigned int currentTime, lastTime;
+  int moistReading;
+
+  currentTime =millis();
+  moistReading = analogRead(pin);
+  if((currentTime-lastTime)>interval){
+    lastTime = millis();
+    moistFeed.publish(moistReading);
+    if(moistReading > threshold){
+      //waterPump(PUMP,500);
       Serial.printf("Soil dry, watering now\n");
     }
     else{
       Serial.printf("Soil good");
     }
-    return;
+}
+}
+
+void waterPump(int pump,int timeON){
+  digitalWrite(pump,HIGH);
+  delay(timeON);
+  digitalWrite(pump,LOW);
 }
 
 
